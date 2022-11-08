@@ -115,29 +115,48 @@ def chunk(scale, chunk_x, chunk_y, chunk_z, chunk_c):
     """
     assert chunk_c == 0, "neuroglancer requires that all blocks include all channels"
 
-    # Determine the bounding box of the requested chunk in full-res coordinates.
     corner = BLOCK_SHAPE[:3] * np.array([chunk_x, chunk_y, chunk_z])
-
-    # The box of data covered by this chunk, limited to the region that
-    # intersects the volume's entire bounding box.
     box = np.array([corner, corner + BLOCK_SHAPE[:3]])
-    box[1] = np.minimum(box[1], VOL_SHAPE[:3] // 2**scale)
+    block_vol = gradient_data_for_chunk(scale, box)
 
-    # This is the portion of the chunk that is actually populated.
+    return (
+        # Encode to N5 chunk format (header + compressed data)
+        CHUNK_ENCODER.encode(block_vol),
+        HTTPStatus.OK,
+        {'Content-Type': 'application/octet-stream'}
+    )
+
+
+def gradient_data_for_chunk(scale, box):
+    """
+    Return the demo gradient data for a single chunk.
+
+    Args:
+        scale:
+            Which downscale level is being requested
+        box:
+            The bounding box of the requested chunk,
+            specified in units of the chunk's own scale.
+    """
+    # Compute the portion of the box that is actually populated.
     # It will differ from [(0,0,0), BLOCK_SHAPE] at higher scales,
     # where the chunk may extend beyond the bounding box of the entire volume.
-    sub_box = box - corner
+    box = box.copy()
+    box[1] = np.minimum(box[1], VOL_SHAPE[:3] // 2**scale)
 
-    # The complete chunk box, in scale-0 coordinates.
+    # Same as box, but in chunk-relative coordinates.
+    rel_box = box - box[0]
+
+    # Same as box, but in scale-0 coordinates.
     box_s0 = (2**scale) * box
 
     # Allocate the chunk.
-    # Note:
-    #   For convenience below, we want to address the chunk via [X,Y,Z,C] indexing (F-order).
-    #   However, the chunk encoder expects a [C,Z,Y,X] array (C-order).
-    #   To have our convenience but avoid an unnecessary copy, we initialize here
-    #   with a transpose to F-order, and transpose back to C-order below.
-    block_vol = np.zeros(BLOCK_SHAPE[::-1], np.float32).T
+    shape_czyx = BLOCK_SHAPE[::-1]
+    block_vol_czyx = np.zeros(shape_czyx, np.float32)
+
+    # For convenience below, we want to address the
+    # chunk via [X,Y,Z,C] indexing (F-order).
+    block_vol = block_vol_czyx.T
 
     # Interpolate along each axis and write the results
     # into separate channels (X=red, Y=green, Z=blue).
@@ -146,16 +165,12 @@ def chunk(scale, chunk_x, chunk_y, chunk_z, chunk_c):
         v0, v1 = np.interp(box_s0[:, c], [0, VOL_SHAPE[c]], [0, 1.0])
 
         # Write the gradient for this channel.
-        i0, i1 = sub_box[:, c]
+        i0, i1 = rel_box[:, c]
         view = np.moveaxis(block_vol[..., c], c, -1)
         view[..., i0:i1] = np.linspace(v0, v1, i1 - i0, False)
 
-    return (
-        # Encode to N5 chunk format (header + compressed data)
-        CHUNK_ENCODER.encode(block_vol.T),
-        HTTPStatus.OK,
-        {'Content-Type': 'application/octet-stream'}
-    )
+    # Return the C-order view
+    return block_vol_czyx
 
 
 if __name__ == "__main__":
